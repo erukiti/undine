@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -70,17 +71,17 @@ type ProcessReport struct {
 }
 
 func main() {
-	// log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// logFile := "./log.txt"
-	// if logFile != "" {
-	// 	logWriter, err := os.OpenFile(logFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	// 	if err != nil {
-	// 		log.Printf("log file error: %s\n", err)
-	// 	} else {
-	// 		log.SetOutput(logWriter)
-	// 	}
-	// }
+	logFile := "./log.txt"
+	if logFile != "" {
+		logWriter, err := os.OpenFile(logFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			log.Printf("log file error: %s\n", err)
+		} else {
+			log.SetOutput(logWriter)
+		}
+	}
 
 	commands := make(map[string]*Child)
 
@@ -91,7 +92,7 @@ func main() {
 		var stdin Stdin
 		var report Report
 
-		// log.Println("packet received")
+		log.Println("packet received")
 		// fmt.Fprintf(os.Stderr, "packet received.\n")
 
 		value, ind, err := decoder.Decode(&com, &stdin, &report)
