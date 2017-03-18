@@ -27,6 +27,17 @@ type Command struct {
 	Args    []string `msgpack:"args"`
 }
 
+type RequestReport struct {
+	Type string `msgpack:"type"`
+	UUID string `msgpack:"uuid"`
+}
+
+type RequestChdir struct {
+	Type string `msgpack:"type"`
+	UUID string `msgpack:"uuid"`
+	Dir  string `msgpack:"dir"`
+}
+
 type Stdin struct {
 	Type string `msgpack:"type"`
 	UUID string `msgpack:"uuid"`
@@ -59,15 +70,39 @@ type Exit struct {
 	Message  string `msgpack:"message"`
 	SysTime  uint   `msgpack:"systime"`
 	UserTime uint   `msgpack:"usertime"`
+	ExitCode int    `msgpack:"code"`
 }
 
 type Report struct {
-	Username string `msgpack:"uesrname"`
+	Type     string `msgpack:"type"`
+	UUID     string `msgpack:"uuid"`
+	Username string `msgpack:"username"`
 	Cwd      string `msgpack:"cwd"`
 }
 
 type ProcessReport struct {
 	Pid int `msgpack:"pid"`
+}
+
+type Ping struct {
+	Type string `msgpack:"type"`
+}
+
+func report(encoder msgpack.Encoder, uuid string) {
+	usr, err := user.Current()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "user.Current error: %s\n", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Getwd error: %s\n", err)
+	}
+
+	report := Report{"report", uuid, usr.Username, cwd}
+	err = encoder.Encode(report)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+	}
 }
 
 func main() {
@@ -83,19 +118,49 @@ func main() {
 		}
 	}
 
+	log.Printf("start %d", os.Getpid())
+
 	commands := make(map[string]*Child)
 
 	decoder := msgpack.NewDecoder(bufio.NewReader(os.Stdin))
 	encoder := msgpack.NewEncoder(os.Stdout)
+
+	chanPing := make(chan bool, 1)
+
+	go func() {
+		for {
+			select {
+			case <-chanPing:
+				continue
+			case <-time.After(10 * time.Second):
+				log.Print("no ping timeout.")
+				// os.Exit(127)
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			ping := Ping{"ping"}
+			encoder.Encode(ping)
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	defer log.Printf("exit %d", os.Getpid())
+
 	for {
+
 		var com Command
 		var stdin Stdin
-		var report Report
+		var requestReport RequestReport
+		var requestChdir RequestChdir
+		var ping Ping
 
 		log.Println("packet received")
 		// fmt.Fprintf(os.Stderr, "packet received.\n")
 
-		value, ind, err := decoder.Decode(&com, &stdin, &report)
+		value, ind, err := decoder.Decode(&com, &stdin, &requestReport, &requestChdir, &ping)
 		if err != nil {
 			// log.Printf("decode error: %s\n", err)
 			fmt.Fprintf(os.Stderr, "decode error: %s\n", err)
@@ -108,6 +173,7 @@ func main() {
 		case -1:
 			fmt.Fprintln(os.Stderr, "decode error. なぜ?")
 			util.Dump(value)
+
 		case 0:
 			child := NewChild(com)
 			commands[com.UUID] = child
@@ -152,6 +218,12 @@ func main() {
 							fmt.Fprintf(os.Stderr, "%s\n", err)
 						}
 					case state := <-child.exitState:
+						code := -1
+
+						if status, ok := state.Sys().(syscall.WaitStatus); ok {
+							code = status.ExitStatus()
+						}
+
 						exit := Exit{
 							"exit",
 							child.com.UUID,
@@ -159,6 +231,7 @@ func main() {
 							state.String(),
 							uint(state.SystemTime()),
 							uint(state.UserTime()),
+							code,
 						}
 						err := encoder.Encode(exit)
 						if err != nil {
@@ -167,6 +240,7 @@ func main() {
 					}
 				}
 			}(child)
+
 		case 1:
 			cmd, ok := commands[stdin.UUID]
 			if ok {
@@ -174,19 +248,22 @@ func main() {
 			} else {
 				fmt.Fprintln(os.Stderr, "stdin packet: unknown UUID.")
 			}
-		case 2:
-			usr, err := user.Current()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "user.Current error: %s\n", err)
-			}
-			cwd, err := syscall.Getwd()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Getcwd error: %s\n", err)
-			}
-			report.Cwd = cwd
-			report.Username = usr.Username
 
+		case 2:
+			report(encoder, requestReport.UUID)
+
+		case 3:
+			err := os.Chdir(requestChdir.Dir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+			}
+
+			report(encoder, requestChdir.UUID)
+
+		case 4:
+			chanPing <- true
 		}
 		time.Sleep(1 * time.Millisecond)
+
 	}
 }
