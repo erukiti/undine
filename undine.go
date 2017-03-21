@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,50 +23,62 @@ const (
 )
 
 type Command struct {
-	Type    string   `msgpack:"type"`
+	Type    string   `msgpack:"type=command"`
 	UUID    string   `msgpack:"uuid"`
 	Command string   `msgpack:"command"`
 	Args    []string `msgpack:"args"`
 }
 
 type RequestReport struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=request_report"`
 	UUID string `msgpack:"uuid"`
 }
 
 type RequestChdir struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=request_chdir"`
 	UUID string `msgpack:"uuid"`
 	Dir  string `msgpack:"dir"`
 }
 
+type RequestGlob struct {
+	Type    string `msgpack:"type=request_glob"`
+	UUID    string `msgpack:"uuid"`
+	Pattern string `msgpack:"pattern"`
+}
+
+type DirEntry struct {
+	Type  string   `msgpack:"type=dir_entry"`
+	UUID  string   `msgpack:"uuid"`
+	Names []string `msgpack:"names"`
+}
+
 type Stdin struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=stdin"`
 	UUID string `msgpack:"uuid"`
 	Buf  []byte `msgpack:"buf"`
 }
 
 type Stdout struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=stdout"`
 	UUID string `msgpack:"uuid"`
 	Buf  []byte `msgpack:"buf"`
 }
 
 type Stderr struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=stderr"`
 	UUID string `msgpack:"uuid"`
 	Buf  []byte `msgpack:"buf"`
 }
 
 type Error struct {
-	Type    string `msgpack:"type"`
+	Type    string `msgpack:"type=error"`
 	UUID    string `msgpack:"uuid"`
 	Code    string `msgpack:"code"`
 	Message string `msgpack:"message"`
 }
 
 type Exit struct {
-	Type     string `msgpack:"type"`
+	Type     string `msgpack:"type=exit"`
 	UUID     string `msgpack:"uuid"`
 	Success  bool   `msgpack:"success"`
 	Message  string `msgpack:"message"`
@@ -74,10 +88,11 @@ type Exit struct {
 }
 
 type Report struct {
-	Type     string `msgpack:"type"`
-	UUID     string `msgpack:"uuid"`
-	Username string `msgpack:"username"`
-	Cwd      string `msgpack:"cwd"`
+	Type     string            `msgpack:"type=report"`
+	UUID     string            `msgpack:"uuid"`
+	Username string            `msgpack:"username"`
+	Cwd      string            `msgpack:"cwd"`
+	Environ  map[string]string `msgpack:"environ"`
 }
 
 type ProcessReport struct {
@@ -85,7 +100,7 @@ type ProcessReport struct {
 }
 
 type Ping struct {
-	Type string `msgpack:"type"`
+	Type string `msgpack:"type=ping"`
 }
 
 func report(encoder msgpack.Encoder, uuid string) {
@@ -98,14 +113,27 @@ func report(encoder msgpack.Encoder, uuid string) {
 		fmt.Fprintf(os.Stderr, "Getwd error: %s\n", err)
 	}
 
-	report := Report{"report", uuid, usr.Username, cwd}
+	environ := make(map[string]string)
+	for _, env := range os.Environ() {
+		ar := strings.SplitN(env, "=", 2)
+		environ[ar[0]] = ar[1]
+	}
+	util.Dump(environ)
+	report := Report{"report", uuid, usr.Username, cwd, environ}
 	err = encoder.Encode(report)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
 	}
+	log.Print("123")
 }
 
 func main() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("panic: %v", err)
+		}
+	}()
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	logFile := "./log.txt"
@@ -156,23 +184,23 @@ func main() {
 		var requestReport RequestReport
 		var requestChdir RequestChdir
 		var ping Ping
+		var requestGlob RequestGlob
 
-		log.Println("packet received")
-		// fmt.Fprintf(os.Stderr, "packet received.\n")
-
-		value, ind, err := decoder.Decode(&com, &stdin, &requestReport, &requestChdir, &ping)
+		value, ind, err := decoder.Decode(&com, &stdin, &requestReport, &requestChdir, &ping, &requestGlob)
 		if err != nil {
 			// log.Printf("decode error: %s\n", err)
 			fmt.Fprintf(os.Stderr, "decode error: %s\n", err)
 			return
 		}
 
-		// log.Printf("decode: %d\n", ind)
+		if ind != 4 {
+			log.Printf("packet received %d\n", ind)
+			util.Dump(value)
+		}
 
 		switch ind {
 		case -1:
-			fmt.Fprintln(os.Stderr, "decode error. なぜ?")
-			util.Dump(value)
+			fmt.Fprintln(os.Stderr, "unknown packet")
 
 		case 0:
 			child := NewChild(com)
@@ -203,7 +231,7 @@ func main() {
 				for {
 					select {
 					case buf := <-child.stdout:
-						// fmt.Fprintf(os.Stderr, "stdout(%d): %s\n", len(buf), buf)
+						// log.Printf("stdout(%d): %s\n", len(buf), buf)
 						stdout := Stdout{"stdout", child.com.UUID, buf}
 						err := encoder.Encode(stdout)
 						if err != nil {
@@ -262,6 +290,19 @@ func main() {
 
 		case 4:
 			chanPing <- true
+
+		case 5:
+			matches, err := filepath.Glob(requestGlob.Pattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+			} else {
+				dirEntry := DirEntry{"dir_entry", requestGlob.UUID, matches}
+				err := encoder.Encode(dirEntry)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+				}
+			}
+
 		}
 		time.Sleep(1 * time.Millisecond)
 
